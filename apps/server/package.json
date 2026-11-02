@@ -12,14 +12,16 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio"
+    "db:migrate": "prisma db push",
+    "db:studio": "prisma studio",
+    "db:push": "prisma db push"
   },
   "dependencies": {
-    "@prisma/adapter-better-sqlite3": "7.10.1",
+    "@prisma/adapter-libsql": "7.10.1",
     "@prisma/client": "7.10.1",
     "@zk/shared": "^0.1.0",
-    "better-sqlite3": "^13.0.3",
+    "libsql": "^0.5.0",
+    "@libsql/client": "^0.9.0",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.0.0",
     "express": "^5.3.0",
@@ -28,7 +30,6 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.6",

@@ -21,8 +21,9 @@
     "typecheck": "npm run build:shared && npm run typecheck -w @zk/server && npm run typecheck -w @zk/web",
     "test": "npm run test -w @zk/server",
     "db:generate": "npm run db:generate -w @zk/server",
-    "db:migrate": "npm run db:migrate -w @zk/server",
-    "db:studio": "npm run db:studio -w @zk/server"
+    "db:migrate": "npm run db:push -w @zk/server",
+    "db:studio": "npm run db:studio -w @zk/server",
+    "db:push": "npm run db:push -w @zk/server"
   },
   "devDependencies": {
     "concurrently": "^10.0.6",

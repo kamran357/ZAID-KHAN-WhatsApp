@@ -1,15 +1,9 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
-import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3';
-import { PrismaClient } from '../../generated/prisma/client.js';
-import { env } from '../config/env.js';
+import { PrismaLibSql } from '@prisma/adapter-libsql';
+import { PrismaClient } from '../../generated/prisma/client.ts';
 import { log } from '../logging.js';
 
-/**
- * `file:./data/zaidkhan.db` is resolved against the server package directory, so
- * `npm run dev` and `npm run start` agree on where the database lives.
- * A non-`file:` URL (Postgres later) is passed through untouched.
- */
 export function resolveDatabaseUrl(url: string): string {
   if (!url.startsWith('file:')) return url;
   const target = url.slice('file:'.length);
@@ -19,20 +13,51 @@ export function resolveDatabaseUrl(url: string): string {
   return `file:${absolute}`;
 }
 
-const adapter = new PrismaBetterSqlite3({ url: resolveDatabaseUrl(env.DATABASE_URL) });
+let prismaClient: PrismaClient | null = null;
+let adapter: PrismaLibSql | null = null;
 
-export const prisma = new PrismaClient({ adapter });
+function getAdapter(): PrismaLibSql {
+  if (!adapter) {
+    const rawUrl = process.env.DATABASE_URL;
+    if (rawUrl == null || rawUrl === '') {
+      throw new Error(`DATABASE_URL is not set (cwd=${process.cwd()})`);
+    }
+    const resolvedUrl = resolveDatabaseUrl(rawUrl);
+    log.info('db/getAdapter', { rawUrl, resolvedUrl, cwd: process.cwd() });
+    adapter = new PrismaLibSql({ url: resolvedUrl });
+    log.info('db/getAdapter', { adapterCreated: true, adapterName: adapter.adapterName, adapterProvider: adapter.provider });
+  }
+  return adapter;
+}
+
+function getPrisma(): PrismaClient {
+  if (!prismaClient) {
+    log.info('db/getPrisma', { adapterConstructor: getAdapter().constructor.name });
+    prismaClient = new PrismaClient({ adapter: getAdapter() });
+    log.info('db/getPrisma', { prismaClientCreated: true });
+  }
+  return prismaClient;
+}
+
+export const prisma = new Proxy({} as PrismaClient, {
+  get(_target, prop: string | symbol) {
+    if (!prismaClient) {
+      prismaClient = getPrisma();
+    }
+    return (prismaClient as unknown as Record<string | symbol, unknown>)[prop];
+  },
+});
 
 export async function checkDatabase(): Promise<boolean> {
   try {
     await prisma.$queryRaw`SELECT 1`;
     return true;
   } catch (error) {
-    log.error('db/check-failed', { error: error instanceof Error ? error.message : 'unknown' });
+    log.error('db/check-failed', { error });
     return false;
   }
 }
 
 export async function disconnectDatabase(): Promise<void> {
-  await prisma.$disconnect();
+  if (prismaClient) await prismaClient.$disconnect();
 }
