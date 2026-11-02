@@ -1,0 +1,30 @@
+# dependencies
+node_modules/
+.probe/
+
+# builds
+dist/
+.next/
+out/
+*.tsbuildinfo
+
+# prisma
+apps/server/generated/
+apps/server/prisma/migrations/**/migration_lock.toml.bak
+
+# runtime data (Baileys creds, sqlite db, downloaded media)
+data/
+apps/server/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# env & secrets
+.env
+.env.*
+!.env.example
+
+# logs / os
+*.log
+.DS_Store

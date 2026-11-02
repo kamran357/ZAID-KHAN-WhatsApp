@@ -1,0 +1,303 @@
+// ZAID KHAN — Prisma 7 schema (SQLite now, Postgres later; see docs/architecture.md §4).
+// NOTE: no scalar lists (SQLite cannot) and the client is generated to ../generated/prisma.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+enum AutopilotMode {
+  OFF
+  APPROVAL
+  FULL_AUTO
+}
+
+enum BudgetPolicy {
+  PAUSE_AI
+  DRAFT_ONLY
+}
+
+enum WaStatus {
+  DISCONNECTED
+  CONNECTING
+  QR_PENDING
+  CONNECTED
+  RECONNECTING
+  LOGGED_OUT
+  ERROR
+}
+
+enum Direction {
+  INBOUND
+  OUTBOUND
+}
+
+enum Author {
+  CUSTOMER
+  AI
+  HUMAN
+  SYSTEM
+}
+
+enum MessageKind {
+  TEXT
+  AUDIO
+  IMAGE
+  DOCUMENT
+  STICKER
+  REACTION
+  OTHER
+}
+
+enum MessageStatus {
+  RECEIVED
+  SKIPPED
+  DRAFTED
+  APPROVED
+  REJECTED
+  SENDING
+  SENT
+  FAILED
+  AI_RATE_LIMITED
+}
+
+enum HandoffReason {
+  LOW_CONFIDENCE
+  ANGRY_CUSTOMER
+  SENSITIVE_PAYMENT
+  SENSITIVE_CREDENTIALS
+  EXPLICIT_REQUEST
+  UNSUPPORTED_MEDIA
+  AI_RATE_LIMITED
+  AI_BUDGET_EXCEEDED
+  AI_ERROR
+  OUT_OF_HOURS
+}
+
+enum KnowledgeCategory {
+  PRODUCT
+  PRICE
+  FAQ
+  POLICY
+  HOURS
+  CONTACT
+  OTHER
+}
+
+enum NotificationType {
+  HANDOFF
+  QR_REQUIRED
+  LIMIT_REACHED
+  AI_ERROR
+  CONNECTION
+  INFO
+}
+
+model Settings {
+  id        String        @id @default("singleton")
+  ownerId   String        @default("owner")
+  aiModel   String        @default("openai/gpt-oss-120b")
+  fallbackModel String?
+  transcriptionModel String @default("whisper-large-v3-turbo")
+  autopilotMode AutopilotMode @default(APPROVAL)
+  businessName  String    @default("ZAID KHAN")
+  persona       String?
+  workingHoursEnabled Boolean @default(false)
+  workingDays   Json      @default("[1,2,3,4,5,6]")
+  workingStart  String    @default("09:00")
+  workingEnd    String    @default("21:00")
+  timezone      String    @default("Asia/Karachi")
+  outOfHoursMessage String?
+  replyDelayMinSec  Int   @default(4)
+  replyDelayMaxSec  Int   @default(12)
+  dailyReplyLimit   Int   @default(200)
+  maxConsecutiveAi  Int   @default(3)
+  sendTypingPresence Boolean @default(true)
+  confidenceThreshold Float @default(0.55)
+  maxOutputTokens   Int   @default(300)
+  skipTrivialMessages Boolean @default(true)
+  cacheReuseEnabled Boolean @default(true)
+  dailyRequestBudget Int  @default(500)
+  dailyTokenBudget   Int  @default(200000)
+  budgetPolicy      BudgetPolicy @default(PAUSE_AI)
+  outOfLimitAutoReply Boolean @default(false)
+  groqApiKeyEnc     String?
+  groqApiKeyLast4   String?
+  updatedAt         DateTime @updatedAt
+}
+
+model WhatsAppSession {
+  id                   String   @id @default(cuid())
+  ownerId              String   @default("owner")
+  status               WaStatus @default(DISCONNECTED)
+  phoneNumber          String?
+  pushName             String?
+  credsDir             String
+  lastQrAt             DateTime?
+  lastConnectedAt      DateTime?
+  lastDisconnectCode   Int?
+  lastDisconnectReason String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+model Contact {
+  id                 String    @id @default(cuid())
+  ownerId            String    @default("owner")
+  waJid              String    @unique
+  phone              String?
+  name               String?
+  pushName           String?
+  isGroup            Boolean   @default(false)
+  isWhitelisted      Boolean   @default(false)
+  isBlacklisted      Boolean   @default(false)
+  isExcluded         Boolean   @default(false)
+  excludeReason      String?
+  autopilotEnabled   Boolean?
+  needsHuman         Boolean   @default(false)
+  needsHumanReason   String?
+  tags               Json?
+  inboundCount       Int       @default(0)
+  unreadCount        Int       @default(0)
+  lastMessageAt      DateTime?
+  lastMessagePreview String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  messages           Message[]
+  handoffs           HandoffEvent[]
+
+  @@index([lastMessageAt])
+}
+
+model Message {
+  id            String        @id @default(cuid())
+  ownerId       String        @default("owner")
+  waMessageId   String        @unique
+  contactId     String
+  contact       Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  chatJid       String
+  direction     Direction
+  author        Author
+  kind          MessageKind   @default(TEXT)
+  text          String?
+  draftText     String?
+  transcript    String?
+  mediaMime     String?
+  mediaPath     String?
+  status        MessageStatus @default(RECEIVED)
+  skipReason    String?
+  handoffReason HandoffReason?
+  aiModel       String?
+  confidence    Float?
+  latencyMs     Int?
+  tokensIn      Int?
+  tokensOut     Int?
+  waTimestamp   DateTime
+  createdAt     DateTime      @default(now())
+  sentAt        DateTime?
+
+  @@index([contactId, waTimestamp])
+  @@index([status, createdAt])
+}
+
+model KnowledgeEntry {
+  id        String            @id @default(cuid())
+  ownerId   String            @default("owner")
+  title     String
+  category  KnowledgeCategory @default(FAQ)
+  content   String
+  keywords  String?
+  price     Float?
+  currency  String?
+  active    Boolean           @default(true)
+  source    String?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@index([active, category])
+}
+
+model HandoffEvent {
+  id         String        @id @default(cuid())
+  ownerId    String        @default("owner")
+  contactId  String
+  contact    Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  messageId  String?
+  reason     HandoffReason
+  note       String?
+  resolvedAt DateTime?
+  createdAt  DateTime      @default(now())
+
+  @@index([createdAt])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  ownerId   String           @default("owner")
+  type      NotificationType
+  title     String
+  body      String
+  contactId String?
+  read      Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  @@index([read, createdAt])
+}
+
+model DailyStat {
+  id               String   @id @default(cuid())
+  date             String   @unique
+  inbound          Int      @default(0)
+  aiReplies        Int      @default(0)
+  humanReplies     Int      @default(0)
+  draftsCreated    Int      @default(0)
+  draftsApproved   Int      @default(0)
+  handoffs         Int      @default(0)
+  skips            Int      @default(0)
+  responseMsTotal  Int      @default(0)
+  responseCount    Int      @default(0)
+  aiTokens         Int      @default(0)
+  transcriptionSec Float    @default(0)
+  updatedAt        DateTime @updatedAt
+}
+
+model AiUsage {
+  id               String   @id @default(cuid())
+  date             String
+  model            String
+  requests         Int      @default(0)
+  promptTokens     Int      @default(0)
+  completionTokens Int      @default(0)
+  rateLimitHits    Int      @default(0)
+  errors           Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([date, model])
+  @@index([date])
+}
+
+model AiRateLimitState {
+  id            String   @id @default("current")
+  remainingRequests Int?
+  limitRequests Int?
+  resetRequestsAt DateTime?
+  remainingTokens Int?
+  limitTokens   Int?
+  resetTokensAt DateTime?
+  retryAfterSec Int?
+  updatedAt     DateTime @updatedAt
+}
+
+model AppSession {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime
+  lastUsedAt DateTime @default(now())
+}

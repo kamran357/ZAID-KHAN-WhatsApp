@@ -1,0 +1,38 @@
+{
+  "name": "zaid-khan",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ZAID KHAN — WhatsApp AI Autopilot dashboard",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "setup": "npm run build:shared && npm run db:generate && npm run db:migrate",
+    "build:shared": "npm run build -w @zk/shared",
+    "dev": "npm run build:shared && concurrently -n api,web -c blue,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev -w @zk/server",
+    "dev:web": "npm run dev -w @zk/web",
+    "build": "npm run build:shared && npm run build -w @zk/server && npm run build -w @zk/web",
+    "typecheck": "npm run build:shared && npm run typecheck -w @zk/server && npm run typecheck -w @zk/web",
+    "test": "npm run test -w @zk/server",
+    "db:generate": "npm run db:generate -w @zk/server",
+    "db:migrate": "npm run db:migrate -w @zk/server",
+    "db:studio": "npm run db:studio -w @zk/server"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6",
+    "typescript": "5.9.3"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "better-sqlite3@13.0.3": true,
+    "@prisma/engines@7.10.1": true,
+    "esbuild@0.28.2": true,
+    "prisma@7.10.1": true
+  }
+}
