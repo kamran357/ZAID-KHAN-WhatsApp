@@ -5,13 +5,17 @@ import { SESSION_COOKIE, SOCKET_ROOM } from '@zk/shared';
 import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { log } from './logging.js';
-import { checkDatabase, disconnectDatabase } from './db/prisma.js';
+import { prisma, checkDatabase, disconnectDatabase } from './db/prisma.js';
 import { setSocketServer } from './socket/emitter.js';
 import { findValidSession, parseCookies } from './services/sessions.js';
 import { broadcastUsage, retryQueue } from './ai/runtime.js';
+import { setPrismaClient } from './services/whatsapp.js';
 
 const app = createApp();
 const httpServer = createServer(app);
+
+// Set the Prisma client for WhatsApp services
+setPrismaClient(prisma);
 
 const io = new Server(httpServer, {
   // Same-origin only: the dashboard reaches this through Next's rewrite proxy,
