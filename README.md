@@ -125,7 +125,16 @@ packages/shared  Socket event contract, DTOs, enums, constants
 docs/architecture.md  Full design: data model, REST + socket contracts, autopilot pipeline
 ```
 
-## Deploying to a VPS (PM2)
+## Deploying
+
+**Vercel can host the dashboard only** — the WhatsApp engine needs one always-on process with a disk
+(Baileys session + SQLite + in-memory queues), which serverless functions cannot provide. Two supported
+topologies, with exact Vercel settings, are documented in [docs/deployment.md](docs/deployment.md):
+
+- **A:** dashboard on Vercel + API on Render/Railway/Fly/VPS.
+- **B:** everything on one VPS (below).
+
+### Single VPS with PM2
 
 ```bash
 # on the server (Node 20+)

@@ -104,6 +104,8 @@ export function createGroqClient(options: GroqClientOptions = {}) {
     if (options.shouldForceRateLimit?.()) {
       const simulated = new Headers({ 'retry-after': '2', 'x-ratelimit-remaining-requests': '0' });
       options.onRateLimits?.(parseRateLimits(simulated, now()));
+      // Mirrors the real 429 path exactly, so the simulation also counts in AiUsage.
+      options.onRateLimitHit?.({ model, retryAfterSec: 2 });
       throw new GroqError('rate_limited', 'Simulated 429 (dev)', { status: 429, retryAfterSec: 2 });
     }
 

@@ -20,6 +20,7 @@ import {
 } from '../services/settings.js';
 import { broadcastUsage, groq, recordModelUsage } from '../ai/runtime.js';
 import { GroqError } from '../ai/groq.js';
+import { recordAiUsage } from '../services/usage.js';
 import { emit } from '../socket/emitter.js';
 
 const router = Router();
@@ -200,6 +201,11 @@ router.post(
       });
     } catch (error) {
       const kind = error instanceof GroqError ? error.kind : 'network';
+      // A failed probe still belongs in the usage counters (errors + rateLimitHits).
+      await recordAiUsage({ model: settings.aiModel, error: true, timeZone: settings.timezone }).catch(
+        () => undefined,
+      );
+      await broadcastUsage();
       res.status(502).json({
         ok: false,
         kind,
