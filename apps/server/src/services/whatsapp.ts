@@ -185,12 +185,12 @@ function extractTimestamp(message: WAMessage): Date | number {
 // ---------------------------------------------------------------------------
 
 import { Server } from 'socket.io';
-import type { ServerToClientEvents } from '../../../../packages/shared/dist/events.js';
-
-let io: Server<ServerToClientEvents, ServerToClientEvents> | null = null;
-
+import type { ServerToClientEvents } from '../../../../packages/shared/dist/events.js';let io: Server<ServerToClientEvents, ServerToClientEvents> | null = null;
 export function setSocketIO(server: Server<ServerToClientEvents, ServerToClientEvents>): void {
   io = server;
+}
+export function getSocketIO(): Server<ServerToClientEvents, ServerToClientEvents> | null {
+  return io;
 }
 
 export function emitWaStatus(state: WhatsAppAdapterState): void {

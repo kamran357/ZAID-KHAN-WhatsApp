@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { WaStatus } from '@zk/shared';
 import { prisma } from '../db/prisma.js';
 import { asyncHandler } from '../http/errors.js';
+import { log } from '../logging.js';
 import {
   getWhatsAppState,
   startWhatsApp,
@@ -9,7 +10,7 @@ import {
   logoutWhatsApp,
   sendMessage as sendTextMessage,
 } from '../services/baileys.js';
-import { setPrismaClient, setupMessageHandler, emitWaQr, emitWaStatus, setSocketIO } from '../services/whatsapp.js';
+import { setPrismaClient, setupMessageHandler, emitWaQr, emitWaStatus, setSocketIO, getSocketIO } from '../services/whatsapp.js';
 import type { Server } from 'socket.io';
 import type { ServerToClientEvents } from '../../../../packages/shared/dist/events.js';
 
@@ -67,8 +68,21 @@ router.post(
       return res.json({ ok: true, message: 'Connection already in progress', status: state.status });
     }
 
-    // Start the WhatsApp service
-    await startWhatsApp(prisma);
+    // Start the WhatsApp service with QR emission
+    await startWhatsApp(prisma, (state) => {
+      // Emit QR via Socket.IO when QR is generated
+      if (state.lastQr) {
+        emitWaQr(state.lastQr, state.lastQrAt ?? null);
+        log.info('wa/qr-emitted', { qrLength: state.lastQr.length });
+      }
+      // Emit status update
+      emitWaStatus(state);
+      // Broadcast state to all connected clients
+      const socketIo = getSocketIO();
+      if (socketIo) {
+        socketIo.emit('wa:state', state);
+      }
+    });
 
     const newState = getWhatsAppState();
     res.json({
@@ -94,8 +108,18 @@ router.post(
       return res.json({ ok: true, message: 'Already connected' });
     }
 
-    // Reset reconnect attempts and try again
-    await startWhatsApp(prisma);
+    // Reset reconnect attempts and try again with QR emission
+    await startWhatsApp(prisma, (state) => {
+      if (state.lastQr) {
+        emitWaQr(state.lastQr, state.lastQrAt ?? null);
+        log.info('wa/qr-emitted', { qrLength: state.lastQr.length });
+      }
+      emitWaStatus(state);
+      const socketIo = getSocketIO();
+      if (socketIo) {
+        socketIo.emit('wa:state', state);
+      }
+    });
 
     const newState = getWhatsAppState();
     res.json({
