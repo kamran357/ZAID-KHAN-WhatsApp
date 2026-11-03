@@ -1,13 +1,17 @@
 import { Router } from 'express';
 import type { WaStatus } from '@zk/shared';
 import { prisma } from '../db/prisma.js';
-import { asyncHandler } from '../http/errors.js';import { getWhatsAppStatus as getWhatsAppState,
-  initializeWhatsAppService,
-  disconnectWhatsAppService,
-  logoutWhatsAppService,
-  sendTextMessage,
-  getWhatsAppStatus,
-} from '../services/whatsapp.js';
+import { asyncHandler } from '../http/errors.js';
+import {
+  getWhatsAppState,
+  startWhatsApp,
+  disconnectWhatsApp,
+  logoutWhatsApp,
+  sendMessage as sendTextMessage,
+} from '../services/baileys.js';
+import { setPrismaClient, setupMessageHandler, emitWaQr, emitWaStatus, setSocketIO } from '../services/whatsapp.js';
+import type { Server } from 'socket.io';
+import type { ServerToClientEvents } from '../../../../packages/shared/dist/events.js';
 
 const router = Router();
 
@@ -64,7 +68,7 @@ router.post(
     }
 
     // Start the WhatsApp service
-    await initializeWhatsAppService();
+    await startWhatsApp(prisma);
 
     const newState = getWhatsAppState();
     res.json({
@@ -91,7 +95,7 @@ router.post(
     }
 
     // Reset reconnect attempts and try again
-    await initializeWhatsAppService();
+    await startWhatsApp(prisma);
 
     const newState = getWhatsAppState();
     res.json({
@@ -111,7 +115,7 @@ router.post(
 router.post(
   '/logout',
   asyncHandler(async (_req, res) => {
-    await logoutWhatsAppService();
+    await logoutWhatsApp(prisma);
 
     const state = getWhatsAppState();
     res.json({
@@ -129,7 +133,7 @@ router.post(
 router.post(
   '/disconnect',
   asyncHandler(async (_req, res) => {
-    await disconnectWhatsAppService();
+    await disconnectWhatsApp(prisma);
 
     const state = getWhatsAppState();
     res.json({
@@ -156,12 +160,11 @@ router.post(
       });
     }
 
-    const result = await sendTextMessage(chatJid, text, contactId ?? undefined);
+    const result = await sendTextMessage(prisma, chatJid, text);
 
     if (result.success) {
       return res.json({
         ok: true,
-        messageId: result.messageId,
         message: 'Message sent',
       });
     } else {
@@ -240,7 +243,7 @@ router.get(
 router.get(
   '/chats/:id',
   asyncHandler(async (req, res) => {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     // Get contact
     const contact = await prisma.contact.findUnique({
@@ -261,7 +264,7 @@ router.get(
     // Get messages for this chat, most recent first
     const messages = await prisma.message.findMany({
       where: {
-        contactId: id as string,
+        contactId: id,
       },
       orderBy: { waTimestamp: 'desc' },
       take: 100,
@@ -277,7 +280,6 @@ router.get(
         skipReason: true,
         createdAt: true,
         sentAt: true,
-        skipReason: true,
       },
     });
 
@@ -319,7 +321,7 @@ router.get(
 router.post(
   '/chats/:id/read',
   asyncHandler(async (req, res) => {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     const contact = await prisma.contact.findUnique({
       where: { id },
@@ -332,7 +334,7 @@ router.post(
     // Mark all messages as read and reset unread count
     await prisma.message.updateMany({
       where: {
-        contactId: id as string,
+        contactId: id,
         author: 'CUSTOMER',
         status: 'RECEIVED',
       },
@@ -359,7 +361,7 @@ router.post(
 router.post(
   '/messages/:id/reply',
   asyncHandler(async (req, res) => {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { text } = req.body;
 
     if (!text) {
@@ -378,12 +380,11 @@ router.post(
     }
 
     // Send the reply
-    const result = await sendTextMessage(message.chatJid, text, message.contactId);
+    const result = await sendTextMessage(prisma, message.chatJid, text);
 
     if (result.success) {
       return res.json({
         ok: true,
-        messageId: result.messageId,
         message: 'Reply sent',
       });
     } else {

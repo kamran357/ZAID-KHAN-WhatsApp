@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { PrismaLibSql } from '@prisma/adapter-libsql';
-import { PrismaClient } from '../../generated/prisma/client.ts';
+import { PrismaClient } from '../../generated/prisma/client.js';
 import { log } from '../logging.js';
 
 export function resolveDatabaseUrl(url: string): string {

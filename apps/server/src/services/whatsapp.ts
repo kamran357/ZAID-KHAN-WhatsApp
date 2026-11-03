@@ -33,8 +33,10 @@ export async function ingestMessage(
     return;
   }
 
-  const chatId = chat.id;
+  // baileys types are incomplete - these exist at runtime
+  const chatId = (chat as unknown as { id: string }).id;
   const senderId = sender;
+  const messageId = (message as unknown as { id: string }).id;
 
   try {
     // Get or create contact
@@ -45,7 +47,7 @@ export async function ingestMessage(
         pushName: pushName ?? null,
         inboundCount: { increment: 1 },
         lastMessageAt: new Date(),
-        lastMessagePreview: message.message?.['text']?.['body']?.slice(0, 100) ?? null,
+        lastMessagePreview: extractText(message) ?? null,
         unreadCount: { increment: 1 },
       },
       create: {
@@ -55,18 +57,18 @@ export async function ingestMessage(
         isGroup,
         inboundCount: 1,
         lastMessageAt: new Date(),
-        lastMessagePreview: message.message?.['text']?.['body']?.slice(0, 100) ?? null,
+        lastMessagePreview: extractText(message) ?? null,
         unreadCount: 1,
       },
     });
 
     // Get message text
-    const body = message.message?.['text']?.['body'] ?? null;
+    const body = extractText(message);
     const isText = !!body;
 
     // Determine message kind
     let kind: 'TEXT' | 'AUDIO' | 'IMAGE' | 'DOCUMENT' | 'STICKER' | 'REACTION' | 'OTHER' = 'OTHER';
-    const msgType = (message.message as { [key: string]: unknown })?.['@type'];
+    const msgType = getMessageType(message);
 
     if (msgType === 'messageText') kind = 'TEXT';
     else if (msgType === 'messageAudio') kind = 'AUDIO';
@@ -77,18 +79,16 @@ export async function ingestMessage(
     else if (isText) kind = 'TEXT';
 
     // Message timestamp
-    const waTimestamp = message.message?.['_serialized']?.['timestamp'] ??
-                        message.message?.['timestamp'] ??
-                        new Date();
+    const waTimestamp = extractTimestamp(message);
 
     // Get or create message (avoid duplicates)
     const existing = await prisma.message.findUnique({
-      where: { waMessageId: message.id },
+      where: { waMessageId: messageId },
     });
 
     if (existing) {
       await prisma.message.update({
-        where: { waMessageId: message.id },
+        where: { waMessageId: messageId },
         data: {
           waTimestamp: new Date(waTimestamp),
           createdAt: new Date(),
@@ -98,206 +98,187 @@ export async function ingestMessage(
     }
 
     // Create message record
-    const newMessage = await prisma.message.create({
+    await prisma.message.create({
       data: {
-        waMessageId: message.id,
-        contactId: contact.id,
+        waMessageId: messageId,
+        contactId: chatId,
         chatJid: chatId,
-        direction: 'INBOUND',
-        author: 'CUSTOMER',
+        direction: message.key.fromMe ? 'OUTBOUND' : 'INBOUND',
+        author: message.key.fromMe ? 'HUMAN' : 'CUSTOMER',
         kind,
         text: body,
+        draftText: null,
         status: 'RECEIVED',
         waTimestamp: new Date(waTimestamp),
+        createdAt: new Date(),
+        // baileys types don't include key.t but it exists at runtime
+        sentAt: (message.key as { t?: number }).t ? new Date((message.key as { t?: number }).t as number) : null,
       },
+    }).catch((error) => {
+      log.error('wa/ingest-create', { error: error instanceof Error ? error.message : 'unknown' });
     });
+    // Update contact
+    await prisma.contact.update({
+      where: { waJid: chatId },
+      data: {
+        lastMessageAt: new Date(),
+        lastMessagePreview: body ?? null,
+        unreadCount: { increment: 1 },
+      },
+    }).catch(() => {});
 
     log.info('wa/ingest', {
-      messageId: message.id,
-      contactId: contact.id,
+      messageId,
+      chatId,
+      direction: message.key.fromMe ? 'OUTBOUND' : 'INBOUND',
       kind,
-      hasText: !!body,
+      textPreview: body ? body.slice(0, 50) : null,
     });
-
-    // Emit socket event for live update
-    const { emit } = await import('../socket/emitter.js');
-    emit('wa:message:new', {
-      message: {
-        id: newMessage.id,
-        chatId: chatId,
-        contactId: contact.id,
-        direction: 'INBOUND' as const,
-        author: 'CUSTOMER' as const,
-        kind,
-        text: body,
-        status: 'RECEIVED' as const,
-        createdAt: newMessage.createdAt.toISOString(),
-        sentAt: null,
-      },
-      contact: {
-        id: contact.id,
-        waJid: chatId,
-        name: contact.name,
-        pushName: contact.pushName,
-        isGroup,
-        unreadCount: contact.unreadCount,
-        lastMessagePreview: contact.lastMessagePreview,
-        lastMessageAt: contact.lastMessageAt?.toISOString() ?? null,
-      },
-      unreadCount: contact.unreadCount,
-    });
-
   } catch (error) {
     log.error('wa/ingest-error', {
       error: error instanceof Error ? error.message : 'unknown',
-      messageId: message.id,
+      messageId,
     });
   }
 }
 
-// ---------------------------------------------------------------------------
-// Message sending with status tracking
-// ---------------------------------------------------------------------------
+// Helper functions for baileys type compatibility
 
-export async function sendTextMessage(
-  chatJid: string,
-  text: string,
-  contactId: string
-): Promise<{ success: boolean; messageId?: string; error?: string }> {
-  if (!prisma) {
-    return { success: false, error: 'prisma client not set' };
-  }
-
+function extractText(message: WAMessage): string | null {
   try {
-    const pendingMessage = await prisma.message.create({
-      data: {
-        waMessageId: `pending-${Date.now()}`,
-        contactId,
-        chatJid,
-        direction: 'OUTBOUND',
-        author: 'HUMAN',
-        kind: 'TEXT',
-        text,
-        status: 'SENDING',
-        waTimestamp: new Date(),
-      },
-    });
+    // baileys message structure: message.message?.['text']?.['body']
+    const msg = message.message as Record<string, unknown>;
+    const textMsg = msg['text'] as Record<string, unknown> | undefined;
+    return textMsg?.['body'] as string | undefined ?? null;
+  } catch {
+    return null;
+  }
+}
 
-    const result = await sendMessage(prisma, chatJid, text, null);
+function getMessageType(message: WAMessage): string | undefined {
+  try {
+    const msg = message.message as Record<string, unknown>;
+    return msg['@type'] as string | undefined;
+  } catch {
+    return undefined;
+  }
+}
 
-    if (result.success) {
-      await prisma.message.update({
-        where: { id: pendingMessage.id },
-        data: {
-          status: 'SENT',
-        },
-      }).catch(() => {});
-
-      const { emit } = await import('../socket/emitter.js');
-      emit('wa:message:sent', {
-        messageId: pendingMessage.id,
-        status: 'SENT',
-      });
-
-      log.info('wa/send-success', { messageId: pendingMessage.id, chatJid });
-      return { success: true, messageId: pendingMessage.id };
-    } else {
-      await prisma.message.update({
-        where: { id: pendingMessage.id },
-        data: {
-          status: 'FAILED',
-        },
-      }).catch(() => {});
-
-      const { emit } = await import('../socket/emitter.js');
-      emit('wa:message:failed', {
-        messageId: pendingMessage.id,
-        error: result.error,
-      });
-
-      log.error('wa/send-failed', { messageId: pendingMessage.id, error: result.error });
-      return { success: false, error: result.error };
+function extractTimestamp(message: WAMessage): Date | number {
+  try {
+    const msg = message.message as Record<string, unknown>;
+    const serialized = msg['_serialized'] as Record<string, unknown> | undefined;
+    if (serialized?.['timestamp']) {
+      return serialized['timestamp'] as number;
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown';
-    log.error('wa/send-error', { error: message, chatJid });
-
-    await prisma.message.updateMany({
-      where: {
-        chatJid,
-        text,
-        status: 'SENDING',
-      },
-      data: { status: 'FAILED' },
-    }).catch(() => {});
-
-    return { success: false, error: message };
+    if (msg['timestamp']) {
+      return msg['timestamp'] as number;
+    }
+    return Date.now();
+  } catch {
+    return Date.now();
   }
 }
 
 // ---------------------------------------------------------------------------
-// WhatsApp service initialization
+// Socket event emitter
 // ---------------------------------------------------------------------------
 
-let onStateChangeHandler: ((state: WhatsAppAdapterState) => void) | null = null;
+import { Server } from 'socket.io';
+import type { ServerToClientEvents } from '../../../../packages/shared/dist/events.js';
 
-export function setOnStateChange(handler: (state: WhatsAppAdapterState) => void): void {
-  onStateChangeHandler = handler;
+let io: Server<ServerToClientEvents, ServerToClientEvents> | null = null;
+
+export function setSocketIO(server: Server<ServerToClientEvents, ServerToClientEvents>): void {
+  io = server;
 }
 
-export async function initializeWhatsAppService(): Promise<void> {
-  if (!prisma) {
-    log.error('wa/init', { error: 'prisma client not set' });
-    return;
-  }
+export function emitWaStatus(state: WhatsAppAdapterState): void {
+  if (!io) return;
+  // Map WhatsAppAdapterState to WaStatusPayload
+  const payload: import('../../../../packages/shared/dist/dto.js').WaStatusPayload = {
+    status: state.status as import('../../../../packages/shared/dist/enums.js').WaStatus,
+    phoneNumber: state.phoneNumber,
+    pushName: state.pushName,
+    lastDisconnectCode: null,
+  };
+  io.emit('wa:status', payload);
+}
 
-  await setMessageHandler(async (message, chat, sender, isGroup, pushName) => {
+export function emitWaQr(qr: string | null, generatedAt: Date | null): void {
+  if (!io) return;
+  io.emit('wa:qr', {
+    qr,
+    generatedAt: generatedAt ? generatedAt.toISOString() : null,
+    available: !!qr,
+  });
+}
+
+export function emitMessageNew(message: { id: string; chatId: string; direction: 'INBOUND' | 'OUTBOUND'; author: 'CUSTOMER' | 'AI' | 'HUMAN' | 'SYSTEM'; kind: 'TEXT' | 'AUDIO' | 'IMAGE' | 'DOCUMENT' | 'STICKER' | 'REACTION' | 'OTHER'; text: string | null; draftText: string | null; status: 'RECEIVED' | 'SKIPPED' | 'DRAFTED' | 'APPROVED' | 'REJECTED' | 'SENDING' | 'SENT' | 'FAILED' | 'AI_RATE_LIMITED'; createdAt: string; sentAt: string | null }, contact: { id: string; waJid: string; name: string; isGroup: boolean; lastMessagePreview: string | null; lastMessageAt: string | null }, unreadCount: number): void {
+  if (!io) return;
+  io.emit('wa:message:new', { message, contact, unreadCount });
+}
+
+export function emitMessageSent(messageId: string, status: string): void {
+  if (!io) return;
+  io.emit('wa:message:sent', { messageId, status });
+}
+
+export function emitMessageFailed(messageId: string, error: string): void {
+  if (!io) return;
+  io.emit('wa:message:failed', { messageId, error });
+}
+
+// ---------------------------------------------------------------------------
+// Message handlers
+// ---------------------------------------------------------------------------
+
+export function setupMessageHandler(): void {
+  setMessageHandler(async (message, chat, sender, isGroup, pushName) => {
     await ingestMessage(message, chat, sender, isGroup, pushName);
+
+    // Emit socket event for new message
+    const chatId = (chat as unknown as { id: string }).id;
+    const messageId = (message as unknown as { id: string }).id;
+    const body = extractText(message);
+
+    emitMessageNew(
+      {
+        id: messageId,
+        chatId,
+        direction: message.key.fromMe ? 'OUTBOUND' : 'INBOUND',
+        author: message.key.fromMe ? 'HUMAN' : 'CUSTOMER',
+        kind: 'TEXT',
+        text: body,
+        draftText: null,
+        status: 'RECEIVED',
+        createdAt: new Date().toISOString(),
+        sentAt: (message.key as { t?: number }).t ? new Date((message.key as { t?: number }).t as number).toISOString() : null,
+      },
+      {
+        id: chatId,
+        waJid: chatId,
+        name: pushName ?? chatId,
+        isGroup,
+        lastMessagePreview: body,
+        lastMessageAt: new Date().toISOString(),
+      },
+      1
+    );
   });
-
-  setOnStateChange(async (state) => {
-    if (prisma) {
-      await prisma.whatsAppSession.updateMany({
-        where: { ownerId: 'owner' },
-        data: {
-          status: state.status,
-          phoneNumber: state.phoneNumber,
-          pushName: state.pushName,
-          lastQrAt: state.lastQrAt,
-          lastConnectedAt: state.connected ? new Date() : null,
-        },
-      }).catch(() => {});
-
-      const { emit } = await import('../socket/emitter.js');
-      emit('wa:status', {
-        status: state.status,
-        phoneNumber: state.phoneNumber,
-        pushName: state.pushName,
-        lastDisconnectCode: null as number | null,
-      });
-
-      if (state.lastQr) {
-        emit('wa:qr', {
-          qr: state.lastQr,
-          imageDataUrl: null as string | null,
-          generatedAt: state.lastQrAt?.toISOString() ?? null,
-          available: true,
-        });
-      }
-    }
-  });
-
-  await startWhatsApp(prisma, onStateChangeHandler);
 }
 
-export async function disconnectWhatsAppService(): Promise<void> {
-  await disconnectWhatsApp(prisma!, onStateChangeHandler);
-}
+export async function sendReply(
+  prisma: PrismaClient,
+  chatId: string,
+  text: string,
+  messageId: string | null
+): Promise<void> {
+  const result = await sendMessage(prisma, chatId, text);
 
-export async function logoutWhatsAppService(): Promise<void> {
-  await logoutWhatsApp(prisma!, onStateChangeHandler);
-}
-
-export function getWhatsAppStatus(): WhatsAppAdapterState {
-  return getWhatsAppState();
+  if (result.success) {
+    emitMessageSent(messageId || `sent-${Date.now()}`, 'SENT');
+  } else {
+    emitMessageFailed(messageId || `sent-${Date.now()}`, result.error || 'Failed to send');
+  }
 }

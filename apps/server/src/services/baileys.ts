@@ -1,8 +1,8 @@
 import { mkdirSync, existsSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
-import makeWASocket, { DisconnectReason } from 'baileys';
-import type { ConnectionState, WAMessage, Chat } from 'baileys';
-import { PrismaClient } from '../../generated/prisma/client.ts';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState } from 'baileys';
+import type { ConnectionState, WAMessage, Chat, AuthenticationState } from 'baileys';
+import { PrismaClient } from '../../generated/prisma/client.js';
 import { log } from '../logging.js';
 
 // ---------------------------------------------------------------------------
@@ -10,7 +10,6 @@ import { log } from '../logging.js';
 // ---------------------------------------------------------------------------
 
 const BAILEYS_DATA_DIR = 'data/baileys';
-const CREDS_FILE = 'credentials.json';
 
 // Random 4-12s delay to avoid ban (anti-detection)
 function randomDelay(minSec = 4, maxSec = 12): number {
@@ -55,6 +54,7 @@ export type MessageHandler = (
 // ---------------------------------------------------------------------------
 
 let socket: ReturnType<typeof makeWASocket> | null = null;
+let currentAuthState: AuthenticationState | null = null;
 let currentState: WhatsAppAdapterState = {
   connected: false,
   phoneNumber: null,
@@ -68,6 +68,7 @@ let reconnectAttempt = 0;
 let isIntentionalDisconnect = false;
 let pendingRestart: Promise<void> | null = null;
 let shouldStart = false;
+let saveCreds: (() => Promise<void>) | null = null;
 
 export function getWhatsAppState(): WhatsAppAdapterState {
   return { ...currentState };
@@ -87,48 +88,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Serialize / restore session
-// ---------------------------------------------------------------------------
-
-async function saveCredentials(sock: ReturnType<typeof makeWASocket>): Promise<void> {
-  try {
-    // Try to dump credentials, but baileys socket may not have this method in all versions
-    const dumpMethod = (sock as unknown as { dump?: () => Promise<unknown> }).dump;
-    if (dumpMethod) {
-      const dump = await dumpMethod();
-      const dir = resolve(BAILEYS_DATA_DIR);
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
-      }
-      writeFileSync(resolve(dir, CREDS_FILE), JSON.stringify(dump, null, 2));
-      log.info('wa/creds', { saved: true, path: resolve(dir, CREDS_FILE) });
-    } else {
-      log.info('wa/creds', { saved: false, reason: 'socket does not support dump' });
-    }
-  } catch (error) {
-    log.error('wa/creds-save', { error: error instanceof Error ? error.message : 'unknown' });
-  }
-}
-
-async function loadCredentials(): Promise<unknown | null> {
-  try {
-    const path = resolve(BAILEYS_DATA_DIR, CREDS_FILE);
-    if (!existsSync(path)) {
-      log.info('wa/creds', { loaded: false, reason: 'file not found' });
-      return null;
-    }
-    const raw = readFileSync(path, 'utf-8');
-    const creds = JSON.parse(raw);
-    log.info('wa/creds', { loaded: true, path });
-    return creds;
-  } catch (error) {
-    log.error('wa/creds-load', { error: error instanceof Error ? error.message : 'unknown' });
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Baileys initialization
+// Baileys initialization with useMultiFileAuthState
 // ---------------------------------------------------------------------------
 
 export async function startWhatsApp(
@@ -158,26 +118,38 @@ export async function startWhatsApp(
   if (!shouldStart) return;
 
   try {
-    const creds = await loadCredentials();
+    // Ensure data directory exists
+    const authDir = resolve(BAILEYS_DATA_DIR);
+    if (!existsSync(authDir)) {
+      mkdirSync(authDir, { recursive: true });
+      log.info('wa/auth-dir', { created: authDir });
+    }
 
-    // Create the socket with minimal config
-    // When starting fresh, baileys needs at least an auth state with creds.me
-    // The socket will generate new credentials on first connection
-    // Use empty auth state if no saved credentials, baileys will create new ones
-    const authState: Record<string, unknown> = (creds && typeof creds === 'object' && creds !== null) ? creds as Record<string, unknown> : {};
-    
-    // Ensure we have at least an empty creds structure
-    if (!authState.creds) {
-      authState.creds = {};
-    }
-    // Ensure creds.me exists (even if empty)
-    if (!authState.creds.me) {
-      authState.creds.me = {} as never;
-    }
-    
+    // Use useMultiFileAuthState to manage auth state in files
+    log.info('wa/auth', { action: 'loading', path: authDir });
+    const { state, saveCreds: saveAuthState } = await useMultiFileAuthState(authDir);
+    currentAuthState = state;
+    saveCreds = saveAuthState;
+    log.info('wa/auth', { action: 'loaded', hasCreds: !!state.creds });
+
+    // Create socket with proper auth state
     socket = makeWASocket({
-      auth: authState as never,
+      auth: state as never,
       logger: createBaileysLogger(),
+    });
+
+    // Listen for credential updates and save them
+    socket.ev.on('creds.update', () => {
+      void (async () => {
+        if (saveCreds) {
+          try {
+            await saveCreds();
+            log.info('wa/creds', { saved: true });
+          } catch (error) {
+            log.error('wa/creds-update', { error: error instanceof Error ? error.message : 'unknown' });
+          }
+        }
+      })();
     });
 
     // --- Connection events ---
@@ -186,87 +158,83 @@ export async function startWhatsApp(
       void (async () => {
         log.info('wa/connection', { state: conn.connection, hasQr: !!conn.qr });
 
-      if (conn.qr) {
-        // QR code available for scanning
-        updateState({
-          status: 'QR_PENDING',
-          lastQr: conn.qr,
-          lastQrAt: new Date(),
-          connected: false,
-          phoneNumber: null,
-        });
-        onStateChange?.(getWhatsAppState());
-        // Save QR to DB
-        prisma.whatsAppSession.updateMany({
-          where: { ownerId: 'owner' },
-          data: {
+        if (conn.qr) {
+          // QR code available for scanning
+          updateState({
             status: 'QR_PENDING',
+            lastQr: conn.qr,
             lastQrAt: new Date(),
-            lastConnectedAt: null,
+            connected: false,
             phoneNumber: null,
-          },
-        }).catch(() => {});
-      }
+          });
+          onStateChange?.(getWhatsAppState());
+          // Save QR to DB
+          prisma.whatsAppSession.updateMany({
+            where: { ownerId: 'owner' },
+            data: {
+              status: 'QR_PENDING',
+              lastQrAt: new Date(),
+              lastConnectedAt: null,
+              phoneNumber: null,
+            },
+          }).catch(() => {});
+        }
 
-      if (conn.connection === 'open') {
-        log.info('wa/ready', {});
-        reconnectAttempt = 0;
-        updateState({
-          status: 'CONNECTED',
-          connected: true,
-        });
-        onStateChange?.(getWhatsAppState());
-
-        // Update DB
-        prisma.whatsAppSession.updateMany({
-          where: { ownerId: 'owner' },
-          data: {
+        if (conn.connection === 'open') {
+          log.info('wa/ready', {});
+          reconnectAttempt = 0;
+          updateState({
             status: 'CONNECTED',
-            lastConnectedAt: new Date(),
-          },
-        }).catch(() => {});
+            connected: true,
+          });
+          onStateChange?.(getWhatsAppState());
 
-        // Get our profile info (delay slightly to allow connection to stabilize)
-        setTimeout(async () => {
-          try {
-            const me = await (socket as unknown as { getProfileInfo: () => Promise<{ name?: string }> }).getProfileInfo();
-            const myNumber = await (socket as unknown as { getNumber: () => Promise<string | undefined> }).getNumber();
-            if (myNumber) {
-              updateState({
-                phoneNumber: myNumber,
-                pushName: me?.name ?? null,
-                status: 'CONNECTED',
-              });
+          // Update DB
+          prisma.whatsAppSession.updateMany({
+            where: { ownerId: 'owner' },
+            data: {
+              status: 'CONNECTED',
+              lastConnectedAt: new Date(),
+            },
+          }).catch(() => {});
 
-              await prisma.whatsAppSession.updateMany({
-                where: { ownerId: 'owner' },
-                data: {
+          // Get our profile info (delay slightly to allow connection to stabilize)
+          setTimeout(async () => {
+            try {
+              const me = await (socket as unknown as { getProfileInfo: () => Promise<{ name?: string }> }).getProfileInfo();
+              const myNumber = await (socket as unknown as { getNumber: () => Promise<string | undefined> }).getNumber();
+              if (myNumber) {
+                updateState({
                   phoneNumber: myNumber,
                   pushName: me?.name ?? null,
                   status: 'CONNECTED',
-                  lastConnectedAt: new Date(),
-                },
-              }).catch(() => {});
-              onStateChange?.(getWhatsAppState());
+                });
+
+                await prisma.whatsAppSession.updateMany({
+                  where: { ownerId: 'owner' },
+                  data: {
+                    phoneNumber: myNumber,
+                    pushName: me?.name ?? null,
+                    status: 'CONNECTED',
+                    lastConnectedAt: new Date(),
+                  },
+                }).catch(() => {});
+                onStateChange?.(getWhatsAppState());
+              }
+            } catch (error) {
+              log.info('wa/profile', { error: error instanceof Error ? error.message : 'unknown' });
             }
-          } catch (error) {
-            log.info('wa/profile', { error: error instanceof Error ? error.message : 'unknown' });
-          }
-        }, 2000);
+          }, 2000);
 
-        // Save credentials after successful connection
-        await saveCredentials(socket);
-      }
+          log.info('wa/connected', { phoneNumber: currentState.phoneNumber });
+        }
 
-      if (conn.connection === 'close') {
-        log.info('wa/disconnected', { reason: conn.lastDisconnect?.date });
-        await handleDisconnect(prisma, onStateChange, conn.lastDisconnect);
-      }
-    })();
+        if (conn.connection === 'close') {
+          log.info('wa/disconnected', { reason: conn.lastDisconnect?.date });
+          await handleDisconnect(prisma, onStateChange, conn.lastDisconnect);
+        }
+      })();
     });
-
-    // TODO: The baileys types are complex, so we're using type assertions throughout.
-    // The runtime should work correctly even if TypeScript complains.
 
     // --- Message handling ---
 
@@ -289,12 +257,15 @@ export async function startWhatsApp(
               // Chat might not exist yet
             }
 
-            const actualIsGroup = chat?.isGroup ?? isGroup;
+            // baileys types are incomplete - these exist at runtime
+            // baileys types are incomplete - msg.id exists at runtime
+            const messageId = (msg as unknown as { id?: string }).id ?? chatId;
+            const actualIsGroup = (chat as unknown as { isGroup?: boolean })?.isGroup ?? isGroup;
             const senderPhone = chatId;
             const senderName = msg.pushName ?? senderPhone;
 
             log.info('wa/inbound', {
-              messageId: msg.id,
+              messageId,
               from: senderPhone,
               isGroup: actualIsGroup,
             });
@@ -312,7 +283,8 @@ export async function startWhatsApp(
           } catch (error) {
             log.error('wa/message-handle', {
               error: error instanceof Error ? error.message : 'unknown',
-              messageId: msg.id,
+              // baileys types are incomplete - msg.id exists at runtime
+              messageId: (msg as unknown as { id?: string }).id ?? (msg.key as { remoteJid?: string }).remoteJid ?? 'unknown',
             });
           }
         }
@@ -405,16 +377,18 @@ export async function disconnectWhatsApp(
     socket = null;
   }
 
-  // Clean up credentials
+  // Clean up auth state files
   try {
-    const credsPath = resolve(BAILEYS_DATA_DIR, CREDS_FILE);
-    if (existsSync(credsPath)) {
-      rmSync(credsPath);
-      log.info('wa/creds', { deleted: true });
+    const authDir = resolve(BAILEYS_DATA_DIR);
+    if (existsSync(authDir)) {
+      rmSync(authDir, { recursive: true, force: true });
+      log.info('wa/auth', { deleted: true, path: authDir });
     }
   } catch {
     // Ignore cleanup errors
   }
+  currentAuthState = null;
+  saveCreds = null;
 
   updateState({
     status: 'DISCONNECTED',
@@ -457,7 +431,10 @@ async function handleDisconnect(
 ): Promise<void> {
   if (socket) {
     try {
-      await saveCredentials(socket);
+      if (saveCreds) {
+        await saveCreds();
+        log.info('wa/creds', { saved: true });
+      }
     } catch {
       // Ignore
     }

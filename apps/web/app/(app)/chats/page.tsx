@@ -96,9 +96,9 @@ export default function ChatsPage() {
             return [
               {
                 ...payload.contact,
-                phone: payload.contact.waJid.includes('@')
-                  ? payload.contact.waJid.split('@')[0]
-                  : payload.contact.waJid,
+                phone: payload.contact.jid.includes('@')
+                  ? payload.contact.jid.split('@')[0]
+                  : payload.contact.jid,
                 unreadCount: payload.unreadCount,
               },
               ...prev,
@@ -397,7 +397,7 @@ export default function ChatsPage() {
                   <h2 className="text-lg font-bold text-navy">{selectedChat.name}</h2>
                   <div className="flex items-center gap-2">
                     {selectedChat.needsHuman && (
-                      <Chip tone="amber">Needs human</Chip>
+                      <Chip tone="yellow">Needs human</Chip>
                     )}
                     {selectedChat.isGroup && (
                       <Chip tone="slate">Group</Chip>
@@ -460,6 +460,7 @@ export default function ChatsPage() {
                         </div>
                       </div>
                     ))
+                  )
                   }
                   <div ref={messagesEndRef} />
                 </div>
@@ -467,6 +468,7 @@ export default function ChatsPage() {
                 {/* Reply input */}
                 <div className="flex gap-2">
                   <Input
+                    label="Reply"
                     placeholder="Type a reply..."
                     value={replyText}
                     onChange={(e) => setReplyText(e.target.value)}

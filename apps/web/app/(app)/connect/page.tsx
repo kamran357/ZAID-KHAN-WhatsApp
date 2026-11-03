@@ -89,11 +89,11 @@ export default function ConnectPage() {
             return [
               {
                 id: payload.contact.id,
-                jid: payload.contact.waJid,
+                jid: payload.contact.jid,
                 name: payload.contact.name,
-                phone: payload.contact.waJid.includes('@')
-                  ? payload.contact.waJid.split('@')[0]
-                  : payload.contact.waJid,
+                phone: payload.contact.jid.includes('@')
+                  ? payload.contact.jid.split('@')[0]
+                  : payload.contact.jid,
                 isGroup: payload.contact.isGroup,
                 unreadCount: 1,
                 lastMessagePreview: payload.contact.lastMessagePreview,

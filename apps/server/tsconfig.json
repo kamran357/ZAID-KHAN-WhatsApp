@@ -1,6 +1,5 @@
 {
   "compilerOptions": {
-    "allowImportingTsExtensions": true,
     "target": "ES2022",
     "lib": ["ES2022"],
     "module": "NodeNext",
@@ -14,7 +13,6 @@
     "forceConsistentCasingInFileNames": true,
     "sourceMap": true,
     "outDir": "dist",
-    "rootDir": ".",
     "types": ["node"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "generated/**/*.ts", "prisma.config.ts"],
